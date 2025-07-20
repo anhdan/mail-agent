@@ -1,0 +1,296 @@
+-- Email AI Agent - Complete Database Schema
+-- Run this entire script in Supabase SQL Editor
+
+-- Enable necessary extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_cron";
+
+-- Table to store email accounts
+CREATE TABLE email_accounts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email VARCHAR(255) UNIQUE NOT NULL,
+  provider VARCHAR(50) NOT NULL, -- 'gmail', 'outlook', 'yahoo', 'custom'
+  imap_host VARCHAR(255) NOT NULL,
+  imap_port INTEGER DEFAULT 993,
+  username VARCHAR(255) NOT NULL,
+  encrypted_password TEXT NOT NULL, -- Store encrypted passwords
+  oauth_refresh_token TEXT, -- For OAuth2 providers (optional)
+  last_check_time TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  last_history_id VARCHAR(255), -- For Gmail API history tracking
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Table to store processed emails to avoid duplicates
+CREATE TABLE processed_emails (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  account_id UUID REFERENCES email_accounts(id) ON DELETE CASCADE,
+  message_id VARCHAR(255) NOT NULL, -- Email Message-ID header
+  email_uid VARCHAR(255), -- IMAP UID for tracking
+  subject TEXT,
+  sender VARCHAR(255),
+  recipient VARCHAR(255), -- Which email account received this
+  received_date TIMESTAMP WITH TIME ZONE,
+  content_preview TEXT, -- First 500 chars of email content
+  summary TEXT NOT NULL, -- AI-generated summary
+  sentiment VARCHAR(20), -- 'positive', 'neutral', 'negative'
+  priority VARCHAR(20) DEFAULT 'normal', -- 'high', 'normal', 'low'
+  has_attachments BOOLEAN DEFAULT false,
+  telegram_sent BOOLEAN DEFAULT false,
+  telegram_sent_at TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  
+  -- Ensure no duplicate processing per account
+  UNIQUE(account_id, message_id)
+);
+
+-- Table to store telegram configurations
+CREATE TABLE telegram_config (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID, -- For future multi-user support
+  bot_token TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  username VARCHAR(255), -- Telegram username for reference
+  notification_preferences JSONB DEFAULT '{}', -- Custom notification settings
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Table to store AI service configurations
+CREATE TABLE ai_config (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  provider VARCHAR(50) NOT NULL, -- 'openai', 'anthropic', 'gemini', 'local'
+  api_key_encrypted TEXT NOT NULL,
+  model VARCHAR(100) DEFAULT 'gpt-3.5-turbo',
+  max_tokens INTEGER DEFAULT 150,
+  temperature DECIMAL(3,2) DEFAULT 0.3,
+  prompt_template TEXT DEFAULT 'Summarize this email in 2-3 sentences, highlighting the key action items and important information:',
+  custom_instructions TEXT, -- Additional AI instructions
+  cost_per_token DECIMAL(10,8), -- Track costs
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Table to track system events and logs
+CREATE TABLE system_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  event_type VARCHAR(50) NOT NULL, -- 'email_processed', 'error', 'telegram_sent', etc.
+  account_id UUID REFERENCES email_accounts(id) ON DELETE SET NULL,
+  message TEXT,
+  metadata JSONB, -- Additional structured data
+  severity VARCHAR(20) DEFAULT 'info', -- 'error', 'warning', 'info', 'debug'
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Table to store user preferences and settings
+CREATE TABLE user_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  setting_key VARCHAR(100) NOT NULL,
+  setting_value TEXT NOT NULL,
+  setting_type VARCHAR(20) DEFAULT 'string', -- 'string', 'number', 'boolean', 'json'
+  description TEXT,
+  is_global BOOLEAN DEFAULT true, -- Global vs user-specific settings
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  
+  UNIQUE(setting_key)
+);
+
+-- Create indexes for better performance
+CREATE INDEX idx_processed_emails_account_id ON processed_emails(account_id);
+CREATE INDEX idx_processed_emails_received_date ON processed_emails(received_date DESC);
+CREATE INDEX idx_processed_emails_telegram_sent ON processed_emails(telegram_sent) WHERE telegram_sent = false;
+CREATE INDEX idx_processed_emails_created_at ON processed_emails(created_at DESC);
+CREATE INDEX idx_email_accounts_active ON email_accounts(is_active) WHERE is_active = true;
+CREATE INDEX idx_email_accounts_provider ON email_accounts(provider);
+CREATE INDEX idx_system_logs_event_type ON system_logs(event_type);
+CREATE INDEX idx_system_logs_created_at ON system_logs(created_at DESC);
+CREATE INDEX idx_system_logs_severity ON system_logs(severity);
+
+-- Create updated_at trigger function
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Apply updated_at triggers
+CREATE TRIGGER update_email_accounts_updated_at 
+  BEFORE UPDATE ON email_accounts 
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_telegram_config_updated_at 
+  BEFORE UPDATE ON telegram_config 
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_ai_config_updated_at 
+  BEFORE UPDATE ON ai_config 
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_user_settings_updated_at 
+  BEFORE UPDATE ON user_settings 
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Insert default system settings
+INSERT INTO user_settings (setting_key, setting_value, setting_type, description) VALUES
+('email_check_interval', '5', 'number', 'Minutes between email checks'),
+('max_email_content_length', '3000', 'number', 'Maximum characters to send to AI'),
+('telegram_notification_enabled', 'true', 'boolean', 'Enable Telegram notifications'),
+('ai_summary_max_length', '150', 'number', 'Maximum tokens for AI summary'),
+('keep_processed_emails_days', '30', 'number', 'Days to keep processed email records'),
+('enable_sentiment_analysis', 'false', 'boolean', 'Enable sentiment analysis of emails'),
+('debug_mode', 'false', 'boolean', 'Enable debug logging');
+
+-- Create a view for email statistics
+CREATE VIEW email_stats AS
+SELECT 
+  ea.email,
+  ea.provider,
+  COUNT(pe.id) as total_emails,
+  COUNT(CASE WHEN pe.created_at >= CURRENT_DATE - INTERVAL '1 day' THEN 1 END) as emails_today,
+  COUNT(CASE WHEN pe.created_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as emails_this_week,
+  COUNT(CASE WHEN pe.telegram_sent = true THEN 1 END) as notifications_sent,
+  MAX(pe.received_date) as last_email_received,
+  ea.last_check_time,
+  ea.is_active
+FROM email_accounts ea
+LEFT JOIN processed_emails pe ON ea.id = pe.account_id
+GROUP BY ea.id, ea.email, ea.provider, ea.last_check_time, ea.is_active;
+
+-- Create a view for recent activity
+CREATE VIEW recent_activity AS
+SELECT 
+  'email' as activity_type,
+  pe.subject as title,
+  pe.sender as details,
+  ea.email as account,
+  pe.created_at
+FROM processed_emails pe
+JOIN email_accounts ea ON pe.account_id = ea.id
+WHERE pe.created_at >= CURRENT_DATE - INTERVAL '7 days'
+
+UNION ALL
+
+SELECT 
+  'system' as activity_type,
+  sl.event_type as title,
+  sl.message as details,
+  COALESCE(ea.email, 'system') as account,
+  sl.created_at
+FROM system_logs sl
+LEFT JOIN email_accounts ea ON sl.account_id = ea.id
+WHERE sl.created_at >= CURRENT_DATE - INTERVAL '7 days'
+  AND sl.severity IN ('error', 'warning')
+
+ORDER BY created_at DESC
+LIMIT 50;
+
+-- Function to clean up old processed emails
+CREATE OR REPLACE FUNCTION cleanup_old_emails()
+RETURNS INTEGER AS $$
+DECLARE
+  days_to_keep INTEGER;
+  deleted_count INTEGER;
+BEGIN
+  -- Get retention setting
+  SELECT setting_value::INTEGER INTO days_to_keep 
+  FROM user_settings 
+  WHERE setting_key = 'keep_processed_emails_days';
+  
+  -- Default to 30 days if not set
+  IF days_to_keep IS NULL THEN
+    days_to_keep := 30;
+  END IF;
+  
+  -- Delete old emails
+  DELETE FROM processed_emails 
+  WHERE created_at < CURRENT_DATE - INTERVAL '1 day' * days_to_keep;
+  
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  
+  -- Log the cleanup
+  INSERT INTO system_logs (event_type, message, metadata) 
+  VALUES (
+    'cleanup_completed', 
+    format('Cleaned up %s old email records', deleted_count),
+    json_build_object('deleted_count', deleted_count, 'days_kept', days_to_keep)
+  );
+  
+  RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get system health status
+CREATE OR REPLACE FUNCTION get_system_health()
+RETURNS JSON AS $$
+DECLARE
+  result JSON;
+BEGIN
+  SELECT json_build_object(
+    'active_accounts', (SELECT COUNT(*) FROM email_accounts WHERE is_active = true),
+    'total_emails_processed', (SELECT COUNT(*) FROM processed_emails),
+    'emails_last_24h', (SELECT COUNT(*) FROM processed_emails WHERE created_at >= CURRENT_DATE - INTERVAL '1 day'),
+    'pending_notifications', (SELECT COUNT(*) FROM processed_emails WHERE telegram_sent = false),
+    'last_activity', (SELECT MAX(created_at) FROM processed_emails),
+    'telegram_configured', (SELECT COUNT(*) > 0 FROM telegram_config WHERE is_active = true),
+    'ai_configured', (SELECT COUNT(*) > 0 FROM ai_config WHERE is_active = true),
+    'recent_errors', (SELECT COUNT(*) FROM system_logs WHERE severity = 'error' AND created_at >= CURRENT_DATE - INTERVAL '1 hour'),
+    'database_size_mb', (
+      SELECT ROUND(SUM(pg_total_relation_size(schemaname||'.'||tablename))/1024/1024, 2) 
+      FROM pg_tables 
+      WHERE schemaname = 'public'
+    ),
+    'check_timestamp', CURRENT_TIMESTAMP
+  ) INTO result;
+  
+  RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Set up Row Level Security (RLS) for security
+ALTER TABLE email_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE processed_emails ENABLE ROW LEVEL SECURITY;
+ALTER TABLE telegram_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_config ENABLE ROW LEVEL SECURITY;
+ALTER TABLE system_logs ENABLE ROW LEVEL SECURITY;
+
+-- Create policies (allowing full access for service role)
+CREATE POLICY "Service role can manage email accounts" 
+  ON email_accounts FOR ALL 
+  USING (auth.role() = 'service_role');
+
+CREATE POLICY "Service role can manage processed emails" 
+  ON processed_emails FOR ALL 
+  USING (auth.role() = 'service_role');
+
+CREATE POLICY "Service role can manage telegram config" 
+  ON telegram_config FOR ALL 
+  USING (auth.role() = 'service_role');
+
+CREATE POLICY "Service role can manage ai config" 
+  ON ai_config FOR ALL 
+  USING (auth.role() = 'service_role');
+
+CREATE POLICY "Service role can manage system logs" 
+  ON system_logs FOR ALL 
+  USING (auth.role() = 'service_role');
+
+-- Grant permissions to authenticated users (for future web interface)
+GRANT SELECT ON email_stats TO authenticated;
+GRANT SELECT ON recent_activity TO authenticated;
+GRANT EXECUTE ON FUNCTION get_system_health() TO authenticated;
+
+-- Success message
+DO $$
+BEGIN
+  RAISE NOTICE 'Email AI Agent database schema created successfully!';
+  RAISE NOTICE 'Tables created: email_accounts, processed_emails, telegram_config, ai_config, system_logs, user_settings';
+  RAISE NOTICE 'Views created: email_stats, recent_activity';
+  RAISE NOTICE 'Functions created: cleanup_old_emails(), get_system_health()';
+  RAISE NOTICE 'Next steps: Configure your email accounts, Telegram, and AI settings';
+END $$;

@@ -1,0 +1,28 @@
+# Python dependencies for Email AI Agent
+# Core dependencies
+supabase==2.3.4
+postgrest==0.13.2
+requests==2.31.0
+
+# Email processing
+imaplib2==3.6
+email-validator==2.1.0.post1
+python-email-mime==0.1.3
+
+# AI integration
+openai==1.6.1
+anthropic==0.8.1
+
+# Encryption and security
+cryptography==41.0.8
+python-dotenv==1.0.0
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+pydantic==2.5.2
+
+# Development and testing (optional)
+pytest==7.4.3
+black==23.12.1
+flake8==6.1.0

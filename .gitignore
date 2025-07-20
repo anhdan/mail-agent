@@ -205,3 +205,30 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# Node.js dependencies
+node_modules/
+# Build output
+dist/
+build/
+# Logs
+logs/
+*.log
+# Environment variables
+.env
+# npm package lock
+package-lock.json
+# Yarn
+yarn-error.log
+yarn.lock
+# Next.js
+.next/
+# Nuxt.js
+.nuxt/
+# Svelte
+.svelte-kit/
+# TypeScript
+*.tsbuildinfo
+# Coverage
+coverage/
