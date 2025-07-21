@@ -232,3 +232,6 @@ yarn.lock
 *.tsbuildinfo
 # Coverage
 coverage/
+
+# env
+*.env.*
