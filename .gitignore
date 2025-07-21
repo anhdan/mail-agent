@@ -234,4 +234,5 @@ yarn.lock
 coverage/
 
 # env
-*.env.*
+*.env
+.env.local
